@@ -2,86 +2,122 @@ import express from 'express';
 import pkg from 'pg';
 import bodyParser from 'body-parser';
 import cors from 'cors';
+import dotenv from 'dotenv';
+import userRoutes from './userRoutes.js';
+import { authMiddleware } from './middleware/authMiddleware.js'; // Import the authMiddleware
+import * as queries from './entriesModel.js'; // Import the queries module
 
 const app = express();
 const port = 3000;
-const { Pool } = pkg;
+dotenv.config();
 
 app.use(cors());
-
 app.use(bodyParser.json());
+app.use('/api/users', userRoutes);
 
-const pool = new Pool({
-    user: 'postgres',
-    host: 'localhost',
-    database: 'diary',
-    password: 'root',
-    port: 5432
-})
+// Setup the PostgreSQL database connection pool
+export const pool = new pkg.Pool({
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT
+});
 
-app.get('/entries', async (req, res) => {
+// GET /entries route to fetch user-specific data
+app.get('/entries', authMiddleware, async (req, res) => {
+    const userId = req.user.id; // Get user id from the decoded token
+
     try {
-        const result = await pool.query("SELECT * FROM entries ORDER BY date DESC");
-        console.log("Fetched entries: ", result.rows);
-        res.json(result.rows);
+        const entries = await queries.getEntriesByUserId(userId);
+        console.log("Fetched entries: ", entries);
+        res.json(entries);
     } catch (err) {
-        res.status(500).send(err.message);
+        console.error('Error fetching entries:', err);
+        res.status(500).send('Failed to fetch entries');
     }
 });
 
-app.get('/entry/:id', async (req, res) => {
+// GET /entry/:id route to fetch a single entry
+app.get('/entry/:id', authMiddleware, async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query("SELECT * FROM entries WHERE id = $1", [id]);
-        console.log("Fetched entry: ", result.rows);
-        res.json(result.rows);
-    } catch (err) {
-        res.status(500).send(err.message);
-    }
-})
+        const userId = req.user.id;
+        const entry = await queries.getEntryById(id);
 
-app.post('/entries', async (req, res) => {
-    const { title, date, content } = req.body;
-    try {
-        const result = await pool.query(
-            'INSERT INTO entries (title, date, content) VALUES ($1, $2, $3) RETURNING *',
-            [title, date, content]
-        );
-        res.json(result.rows[0]);
+        if (entry.length === 0) {
+            return res.status(404).json({ error: "Entry not found or unauthorized" });
+        }
+
+        console.log("Fetched entry: ", entry);
+        res.json(entry[0]);
     } catch (err) {
-        res.status(500).send(err.message);
+        console.error('Error fetching entry:', err);
+        res.status(500).send('Failed to fetch entry');
     }
 });
 
-app.put('/entries/:id', async (req, res) => {
+// POST /entries route to create a new entry
+app.post('/entries', authMiddleware, async (req, res) => {
+    const { title, date, content } = req.body;
+    const userId = req.user?.id;
+
+    if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    try {
+        const newEntry = await queries.createEntry(title, date, content, userId);
+        res.json(newEntry);
+    } catch (err) {
+        console.error('Error creating entry:', err);
+        res.status(500).send('Failed to create entry');
+    }
+});
+
+// PUT /entries/:id route to update an entry
+app.put('/entries/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { title, date, content } = req.body;
+    const userId = req.user.id;
+
     try {
-        const result = await pool.query(
-            "UPDATE entries SET title = $1, date = $2, content = $3 WHERE id = $4 RETURNING *",
-            [title, date, content, id]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).send('Entry not found');
+        const entry = await queries.getEntryByIdAndUserId(id, userId);
+
+        if (entry.length === 0) {
+            console.log("No entry found for this ID or user is unauthorized.");
+            return res.status(404).json({ error: 'Entry not found or unauthorized' });
         }
-        res.json(result.rows[0]);
+
+        const updatedEntry = await queries.updateEntry(id, title, date, content);
+        res.json(updatedEntry);
     } catch (err) {
-        console.error('Error updating entry:', err);  // Log error details
+        console.error('Error updating entry:', err);
         res.status(500).send(`Error: ${err.message}`);
     }
 });
 
-
-app.delete('/entries/:id', async (req, res) => {
+// DELETE /entries/:id route to delete an entry
+app.delete('/entries/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
+    const userId = req.user.id;
+
     try {
-        await pool.query("DELETE FROM entries WHERE id = $1", [id]);
-        res.json({message: "Entry deleted successfully"});
+        const entry = await queries.getEntryByIdAndUserId(id, userId);
+
+        if (entry.length === 0) {
+            return res.status(404).json({ error: 'Entry not found or unauthorized' });
+        }
+
+        await queries.deleteEntry(id);
+        res.json({ message: "Entry deleted successfully" });
     } catch (err) {
-        res.status(500).send(err.message);
+        console.error('Error deleting entry:', err);
+        res.status(500).send('Failed to delete entry');
     }
 });
 
+// Start the server
 app.listen(port, () => {
-    console.log(`listening on port ${port}`)
+    console.log(`Server is listening on port ${port}`);
 });
